@@ -1,6 +1,6 @@
 // Import necessary Node.js modules
 const fs = require('fs');
-const path = require('path');
+const path = require('path'); // PATH module
 // For colorizing console output.
 // The .default fallback is added to handle potential differences in how
 // Chalk's CommonJS export behaves across different versions or environments,
