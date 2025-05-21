@@ -11,26 +11,67 @@ const chalk = require('chalk').default || require('chalk');
 // potential differences in how its CommonJS export behaves.
 const inquirer = require('inquirer').default || require('inquirer');
 
+// Define a list of directory names to exclude from scanning.
+// These are common directories that often contain many files
+// but are usually not relevant for general file categorization.
+const EXCLUDE_DIRS = [
+    'node_modules',
+    'venv',
+    '.git',
+    '.vscode',
+    '__pycache__',
+    'build',
+    'dist',
+    'out',
+    'bin',
+    'obj',
+    'target', // Common in Rust/Java projects
+    'vendor', // Common in Go/PHP projects
+    'tmp',
+    'temp',
+    'log',
+    'logs',
+    'coverage',
+    'docs', // Often contains generated documentation
+    'test', // Often contains test data/fixtures
+    'tests',
+    'examples'
+];
+
 /**
  * Scans a given directory and categorizes files by their extensions,
- * returning an object with categories and file details.
+ * returning an object with categories and file details. This function
+ * now recursively scans subdirectories based on the `fullScan` parameter
+ * and respects an exclude list.
  * @param {string} directoryPath The path to the directory to scan.
+ * @param {boolean} [fullScan=false] If true, recursively scans subdirectories.
  * @returns {Promise<Object|null>} A promise that resolves to an object
  * containing categorized files, or null if an error occurs.
  */
-async function categorizeFiles(directoryPath) {
-    console.log(chalk.blue(`\nScanning directory: ${directoryPath}\n`));
+async function categorizeFiles(directoryPath, fullScan = false) {
+    // Only log the initial scan message, not for every recursive call
+    // The `arguments.length` check is a heuristic to determine if it's the top-level call.
+    // A more robust way might be to pass an internal flag.
+    if (arguments.length <= 1 || (arguments.length === 2 && typeof arguments[1] === 'boolean')) {
+        console.log(chalk.blue(`\nScanning directory: ${directoryPath}${fullScan ? ' (Full Scan Enabled)' : ''}\n`));
+    }
 
     // Check if the directory exists
     if (!fs.existsSync(directoryPath)) {
-        console.error(chalk.red(`Error: Directory not found at "${directoryPath}"`));
+        // For recursive calls, we don't want to error out if a subdirectory
+        // was deleted during the process or is inaccessible.
+        if (arguments.length <= 1 || (arguments.length === 2 && typeof arguments[1] === 'boolean')) {
+            console.error(chalk.red(`Error: Directory not found at "${directoryPath}"`));
+        }
         return null;
     }
 
     // Check if the provided path is actually a directory
     const stats = fs.statSync(directoryPath);
     if (!stats.isDirectory()) {
-        console.error(chalk.red(`Error: "${directoryPath}" is not a directory.`));
+        if (arguments.length <= 1 || (arguments.length === 2 && typeof arguments[1] === 'boolean')) {
+            console.error(chalk.red(`Error: "${directoryPath}" is not a directory.`));
+        }
         return null;
     }
 
@@ -38,19 +79,19 @@ async function categorizeFiles(directoryPath) {
 
     try {
         // Read the contents of the directory
-        const files = await fs.promises.readdir(directoryPath);
+        const filesAndDirs = await fs.promises.readdir(directoryPath);
 
         // Iterate over each file/directory in the list
-        for (const file of files) {
-            const filePath = path.join(directoryPath, file);
+        for (const item of filesAndDirs) {
+            const itemPath = path.join(directoryPath, item);
+            const itemName = path.basename(itemPath);
 
             try {
-                // Get file statistics (e.g., size, type)
-                const fileStats = await fs.promises.stat(filePath);
+                const itemStats = await fs.promises.stat(itemPath);
 
-                if (fileStats.isFile()) {
+                if (itemStats.isFile()) {
                     // If it's a file, get its extension
-                    const ext = path.extname(file).toLowerCase(); // .txt, .jpg, .js, etc.
+                    const ext = path.extname(item).toLowerCase(); // .txt, .jpg, .js, etc.
                     const extension = ext === '' ? 'no_extension' : ext; // Handle files without extensions
 
                     // Initialize array for the extension if it doesn't exist
@@ -60,13 +101,38 @@ async function categorizeFiles(directoryPath) {
 
                     // Add file details to the category
                     categories[extension].push({
-                        name: file,
-                        fullPath: filePath,
-                        size: fileStats.size // Size in bytes
+                        name: item,
+                        fullPath: itemPath,
+                        size: itemStats.size // Size in bytes
                     });
+                } else if (itemStats.isDirectory()) {
+                    // Check if the directory is in the exclude list
+                    if (EXCLUDE_DIRS.includes(itemName)) {
+                        console.log(chalk.gray(`  Skipping excluded directory: ${itemName}`));
+                        continue; // Skip this directory
+                    }
+
+                    // If it's a directory and fullScan is enabled, recursively call categorizeFiles
+                    if (fullScan) {
+                        const subCategories = await categorizeFiles(itemPath, fullScan); // Pass fullScan
+                        if (subCategories) {
+                            // Merge sub-categories into the main categories object
+                            for (const ext in subCategories) {
+                                if (!categories[ext]) {
+                                    categories[ext] = [];
+                                }
+                                categories[ext].push(...subCategories[ext]);
+                            }
+                        }
+                    } else {
+                        // Log that a directory is skipped because fullScan is false
+                        // This message can be commented out if too verbose
+                        // console.log(chalk.gray(`  Skipping directory (fullScan is false): ${itemName}`));
+                    }
                 }
+
             } catch (statErr) {
-                console.warn(chalk.yellow(`  Warning: Could not get stats for "${file}" (${statErr.message})`));
+                console.warn(chalk.yellow(`  Warning: Could not get stats for "${item}" (${statErr.message})`));
             }
         }
         return categories;
@@ -81,8 +147,9 @@ async function categorizeFiles(directoryPath) {
  * Displays the main interactive menu for file categories.
  * @param {Object} categories The categorized file data.
  * @param {string} directoryPath The path to the scanned directory.
+ * @param {boolean} fullScan Indicates if the initial scan was a full scan.
  */
-async function startInteractiveMenu(categories, directoryPath) {
+async function startInteractiveMenu(categories, directoryPath, fullScan) {
     if (Object.keys(categories).length === 0) {
         console.log(chalk.gray("No files found in this directory to categorize."));
         return;
@@ -121,7 +188,7 @@ async function startInteractiveMenu(categories, directoryPath) {
             break;
         }
 
-        await handleCategorySelection(selectedCategory, categories[selectedCategory], directoryPath);
+        await handleCategorySelection(selectedCategory, categories[selectedCategory], directoryPath, fullScan);
     }
 }
 
@@ -130,8 +197,9 @@ async function startInteractiveMenu(categories, directoryPath) {
  * @param {string} categoryName The name of the selected category (extension).
  * @param {Array<Object>} filesInCategory An array of file objects in the category.
  * @param {string} directoryPath The path to the scanned directory.
+ * @param {boolean} fullScan Indicates if the initial scan was a full scan.
  */
-async function handleCategorySelection(categoryName, filesInCategory, directoryPath) {
+async function handleCategorySelection(categoryName, filesInCategory, directoryPath, fullScan) {
     const displayExt = categoryName === 'no_extension' ? 'Files with No Extension' : categoryName.toUpperCase();
     console.log(chalk.magenta(`\n--- Files in ${displayExt} ---`));
 
@@ -164,7 +232,8 @@ async function handleCategorySelection(categoryName, filesInCategory, directoryP
         await handleFileAction(selectedFile, directoryPath);
         // After an action (like deletion), re-scan the directory to reflect changes.
         // This will update the 'categories' object for the next iteration of the main menu.
-        const updatedCategories = await categorizeFiles(directoryPath);
+        // Note: The `categorizeFiles` function now handles recursive scanning.
+        const updatedCategories = await categorizeFiles(directoryPath, fullScan); // Pass fullScan here
         if (updatedCategories) {
             // If re-categorization was successful, break out of this loop
             // to re-enter the main category selection with updated data.
@@ -252,7 +321,6 @@ async function deleteFile(filePath) {
         try {
             await fs.promises.unlink(filePath);
             console.log(chalk.green(`Successfully deleted: "${fileName}"`));
-
         } catch (err) {
             console.error(chalk.red(`Error deleting "${fileName}": ${err.message}`));
         }
@@ -264,30 +332,24 @@ async function deleteFile(filePath) {
         name: 'continue',
         message: chalk.gray('Press Enter to continue...')
     });
-    // Re-scan the directory to update the categories
-    const updatedCategories = await categorizeFiles(path.dirname(filePath));
-    if (updatedCategories) {
-        // If re-categorization was successful, return to the main menu
-        await startInteractiveMenu(updatedCategories, path.dirname(filePath));
-    } else {
-        console.error(chalk.red("Failed to re-scan directory after deletion. Exiting."));
-        process.exit(1);
-    }
 }
 
 // --- Main execution flow ---
 // You can provide the directory path as a command-line argument.
-// Example: node categorize_files.js /path/to/your/directory
+// Example: node categorize_files.js /path/to/your/directory [--fullscan]
 const targetDirectory = process.argv[2];
+const shouldFullScan = process.argv.includes('--fullscan'); // Check for the --fullscan flag
 
 if (!targetDirectory) {
-    console.log(chalk.red("Usage: node categorize_files.js <directory_path>"));
+    console.log(chalk.red("Usage: node categorize_files.js <directory_path> [--fullscan]"));
+    console.log(chalk.red("  <directory_path>: The path to the directory you want to scan."));
+    console.log(chalk.red("  --fullscan: Optional flag to enable recursive scanning of subdirectories."));
     console.log(chalk.red("Please provide the path to the directory you want to scan."));
 } else {
     (async () => {
-        const categories = await categorizeFiles(targetDirectory);
+        const categories = await categorizeFiles(targetDirectory, shouldFullScan); // Pass shouldFullScan
         if (categories) {
-            await startInteractiveMenu(categories, targetDirectory);
+            await startInteractiveMenu(categories, targetDirectory, shouldFullScan); // Pass fullScan to menu
         }
     })();
 }
